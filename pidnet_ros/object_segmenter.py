@@ -5,11 +5,12 @@ import numpy.typing as npt
 import rclpy
 import rclpy.node
 import sensor_msgs.msg
+import std_msgs.msg
 import torch
 from PIDNet.models import pidnet
 
 
-class PIDNetROS(rclpy.node.Node):
+class ObjectSegmenter(rclpy.node.Node):
     INPUT_SIZE = (1024, 512)
     CLASS_COLORS = np.array(
         [
@@ -22,7 +23,7 @@ class PIDNetROS(rclpy.node.Node):
     )
 
     def __init__(self):
-        super().__init__("pidnet_ros")
+        super().__init__("object_segmenter")
 
         checkpoint_file = (
             self.declare_parameter("checkpoint_file", "")
@@ -39,9 +40,16 @@ class PIDNetROS(rclpy.node.Node):
             .get_parameter_value()
             .double_array_value
         )
+        self.use_compressed_image = (
+            self.declare_parameter("use_compressed_image", True)
+            .get_parameter_value()
+            .bool_value
+        )
 
         self.model = pidnet.get_pred_model("pidnet-s", num_classes=4)
-        checkpoint: dict = torch.load(checkpoint_file, map_location="cpu")
+        checkpoint: dict = torch.load(
+            checkpoint_file, map_location="cpu", weights_only=True
+        )
         if "state_dict" in checkpoint:
             checkpoint = checkpoint["state_dict"]
         model_dict = self.model.state_dict()
@@ -61,22 +69,43 @@ class PIDNetROS(rclpy.node.Node):
             "~/result_image",
             1,
         )
-
-        self.image_raw_sub = self.create_subscription(
-            sensor_msgs.msg.Image,
-            "image_raw",
-            self.image_raw_callback,
+        self.result_image_compressed_pub = self.create_publisher(
+            sensor_msgs.msg.CompressedImage,
+            "~/result_image/compressed",
             1,
         )
 
+        if self.use_compressed_image:
+            self.image_raw_sub = self.create_subscription(
+                sensor_msgs.msg.CompressedImage,
+                "image_raw/compressed",
+                self.image_raw_compressed_callback,
+                1,
+            )
+        else:
+            self.image_raw_sub = self.create_subscription(
+                sensor_msgs.msg.Image,
+                "image_raw",
+                self.image_raw_callback,
+                1,
+            )
+
+    def image_raw_compressed_callback(self, msg: sensor_msgs.msg.CompressedImage):
+        source_image = self.cv_bridge.compressed_imgmsg_to_cv2(
+            msg, desired_encoding="rgb8"
+        )
+        self.segment_objects(source_image, msg.header)
+
     def image_raw_callback(self, msg: sensor_msgs.msg.Image):
         source_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-        source_image = cv2.resize(source_image, PIDNetROS.INPUT_SIZE)
+        self.segment_objects(source_image, msg.header)
+
+    def segment_objects(
+        self, source_image: npt.NDArray[np.uint8], header: std_msgs.msg.Header
+    ):
+        source_image = cv2.resize(source_image, ObjectSegmenter.INPUT_SIZE)
 
         input_image: npt.NDArray[np.float64] = source_image / 255
-        # input_image = (
-        #     input_image - input_image.mean(axis=0, keepdims=True)
-        # ) / input_image.std(axis=0, keepdims=True, ddof=1)
         input_image = (
             input_image - self.standardization_mean
         ) / self.standardization_std
@@ -96,26 +125,33 @@ class PIDNetROS(rclpy.node.Node):
         labels = prediction.argmax(dim=1).squeeze(0).cpu().numpy()
 
         result_image = cv2.addWeighted(
-            src1=PIDNetROS.CLASS_COLORS[labels],
+            src1=ObjectSegmenter.CLASS_COLORS[labels],
             src2=source_image,
             alpha=0.5,
             beta=1.0,
             gamma=0.0,
         )
+
         result_image_msg = self.cv_bridge.cv2_to_imgmsg(
-            result_image, encoding="rgb8", header=msg.header
+            result_image, encoding="rgb8", header=header
         )
         self.result_image_pub.publish(result_image_msg)
+
+        result_image_compressed_msg = self.cv_bridge.cv2_to_compressed_imgmsg(
+            result_image
+        )
+        result_image_compressed_msg.header = header
+        self.result_image_compressed_pub.publish(result_image_compressed_msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
 
-    pidnet_ros = PIDNetROS()
+    object_segmenter = ObjectSegmenter()
 
-    rclpy.spin(pidnet_ros)
+    rclpy.spin(object_segmenter)
 
-    pidnet_ros.destroy_node()
+    object_segmenter.destroy_node()
     rclpy.shutdown()
 
 

@@ -18,7 +18,7 @@ setup(
     license="BSD",
     entry_points={
         "console_scripts": [
-            "pidnet_ros_node = pidnet_ros.pidnet_ros:main",
+            "object_segmenter_node = pidnet_ros.object_segmenter:main",
         ],
     },
 )
