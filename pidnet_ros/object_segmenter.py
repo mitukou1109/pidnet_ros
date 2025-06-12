@@ -1,8 +1,13 @@
+import ast
+import copy
+import threading
+
 import cv2
 import cv_bridge
 import numpy as np
 import numpy.typing as npt
 import rclpy
+import rclpy.callback_groups
 import rclpy.node
 import sensor_msgs.msg
 import std_msgs.msg
@@ -11,16 +16,16 @@ from PIDNet.models import pidnet
 
 
 class ObjectSegmenter(rclpy.node.Node):
-    INPUT_SIZE = (1024, 512)
-    CLASS_COLORS = np.array(
-        [
-            [0, 0, 0],  # others: black
-            [255, 255, 0],  # straight: yellow
-            [0, 0, 255],  # fork: blue
-            [255, 0, 0],  # grass: red
-        ],
-        dtype=np.uint8,
-    )
+    MODEL_INPUT_SIZE = (1024, 512)
+
+    class Result:
+        def __init__(
+            self,
+            labels: npt.NDArray[np.uint8],
+            source_image: npt.NDArray[np.uint8],
+        ):
+            self.labels = labels
+            self.source_image = source_image
 
     def __init__(self):
         super().__init__("object_segmenter")
@@ -29,6 +34,22 @@ class ObjectSegmenter(rclpy.node.Node):
             self.declare_parameter("checkpoint_file", "")
             .get_parameter_value()
             .string_value
+        )
+        num_of_classes = (
+            self.declare_parameter("num_of_classes", 4)
+            .get_parameter_value()
+            .integer_value
+        )
+        self.class_colors = np.array(
+            ast.literal_eval(
+                self.declare_parameter(
+                    "class_colors",
+                    "[[0, 0, 0], [255, 255, 0], [0, 0, 255], [255, 0, 0]]",
+                )
+                .get_parameter_value()
+                .string_value
+            ),
+            dtype=np.uint8,
         )
         self.standardization_mean = (
             self.declare_parameter("standardization.mean", [0.485, 0.456, 0.406])
@@ -45,8 +66,13 @@ class ObjectSegmenter(rclpy.node.Node):
             .get_parameter_value()
             .bool_value
         )
+        result_visualization_rate = (
+            self.declare_parameter("result_visualization_rate", 10.0)
+            .get_parameter_value()
+            .double_value
+        )
 
-        self.model = pidnet.get_pred_model("pidnet-s", num_classes=4)
+        self.model = pidnet.get_pred_model("pidnet-s", num_classes=num_of_classes)
         checkpoint: dict = torch.load(
             checkpoint_file, map_location="cpu", weights_only=True
         )
@@ -64,14 +90,12 @@ class ObjectSegmenter(rclpy.node.Node):
 
         self.cv_bridge = cv_bridge.CvBridge()
 
-        self.result_image_pub = self.create_publisher(
+        self.result_lock = threading.Lock()
+        self.result: ObjectSegmenter.Result = None
+
+        self.label_image_pub = self.create_publisher(
             sensor_msgs.msg.Image,
-            "~/result_image",
-            1,
-        )
-        self.result_image_compressed_pub = self.create_publisher(
-            sensor_msgs.msg.CompressedImage,
-            "~/result_image/compressed",
+            "~/label_image",
             1,
         )
 
@@ -90,6 +114,12 @@ class ObjectSegmenter(rclpy.node.Node):
                 1,
             )
 
+        self.visualize_result_timer = self.create_timer(
+            1 / result_visualization_rate,
+            self.visualize_result_callback,
+            rclpy.callback_groups.MutuallyExclusiveCallbackGroup(),
+        )
+
     def image_raw_compressed_callback(self, msg: sensor_msgs.msg.CompressedImage):
         source_image = self.cv_bridge.compressed_imgmsg_to_cv2(
             msg, desired_encoding="rgb8"
@@ -100,10 +130,31 @@ class ObjectSegmenter(rclpy.node.Node):
         source_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
         self.segment_objects(source_image, msg.header)
 
+    def visualize_result_callback(self):
+        if self.result is None:
+            return
+
+        with self.result_lock:
+            result = copy.deepcopy(self.result)
+
+        result_image = cv2.cvtColor(
+            cv2.addWeighted(
+                src1=self.class_colors[result.labels],
+                src2=result.source_image,
+                alpha=0.5,
+                beta=1.0,
+                gamma=0.0,
+            ),
+            cv2.COLOR_RGB2BGR,
+        )
+
+        cv2.imshow("Object segmenter", result_image)
+        cv2.waitKey(1)
+
     def segment_objects(
         self, source_image: npt.NDArray[np.uint8], header: std_msgs.msg.Header
     ):
-        source_image = cv2.resize(source_image, ObjectSegmenter.INPUT_SIZE)
+        source_image = cv2.resize(source_image, ObjectSegmenter.MODEL_INPUT_SIZE)
 
         input_image: npt.NDArray[np.float64] = source_image / 255
         input_image = (
@@ -122,26 +173,15 @@ class ObjectSegmenter(rclpy.node.Node):
             mode="bilinear",
             align_corners=True,
         )
-        labels = prediction.argmax(dim=1).squeeze(0).cpu().numpy()
+        labels = prediction.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-        result_image = cv2.addWeighted(
-            src1=ObjectSegmenter.CLASS_COLORS[labels],
-            src2=source_image,
-            alpha=0.5,
-            beta=1.0,
-            gamma=0.0,
+        label_image_msg = self.cv_bridge.cv2_to_imgmsg(
+            labels, encoding="8UC1", header=header
         )
+        self.label_image_pub.publish(label_image_msg)
 
-        result_image_msg = self.cv_bridge.cv2_to_imgmsg(
-            result_image, encoding="rgb8", header=header
-        )
-        self.result_image_pub.publish(result_image_msg)
-
-        result_image_compressed_msg = self.cv_bridge.cv2_to_compressed_imgmsg(
-            result_image
-        )
-        result_image_compressed_msg.header = header
-        self.result_image_compressed_pub.publish(result_image_compressed_msg)
+        with self.result_lock:
+            self.result = ObjectSegmenter.Result(labels, source_image)
 
 
 def main(args=None):
