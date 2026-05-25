@@ -15,7 +15,7 @@ import torch
 from PIDNet.models import pidnet
 
 
-class ObjectSegmenter(rclpy.node.Node):
+class Segmentation(rclpy.node.Node):
     MODEL_INPUT_SIZE = (1024, 512)
 
     class Result:
@@ -28,7 +28,7 @@ class ObjectSegmenter(rclpy.node.Node):
             self.source_image = source_image
 
     def __init__(self):
-        super().__init__("object_segmenter")
+        super().__init__("segmentation")
 
         checkpoint_file = (
             self.declare_parameter("checkpoint_file", "")
@@ -91,7 +91,7 @@ class ObjectSegmenter(rclpy.node.Node):
         self.cv_bridge = cv_bridge.CvBridge()
 
         self.result_lock = threading.Lock()
-        self.result: ObjectSegmenter.Result = None
+        self.result: Segmentation.Result | None = None
 
         self.label_image_pub = self.create_publisher(
             sensor_msgs.msg.Image,
@@ -121,8 +121,9 @@ class ObjectSegmenter(rclpy.node.Node):
         )
 
     def image_raw_compressed_callback(self, msg: sensor_msgs.msg.CompressedImage):
-        source_image = self.cv_bridge.compressed_imgmsg_to_cv2(
-            msg, desired_encoding="rgb8"
+        source_image = np.array(
+            self.cv_bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="rgb8"),
+            dtype=np.uint8,
         )
         self.segment_objects(source_image, msg.header)
 
@@ -148,15 +149,17 @@ class ObjectSegmenter(rclpy.node.Node):
             cv2.COLOR_RGB2BGR,
         )
 
-        cv2.imshow("Object segmenter", result_image)
+        cv2.imshow("Segmentation", result_image)
         cv2.waitKey(1)
 
     def segment_objects(
         self, source_image: npt.NDArray[np.uint8], header: std_msgs.msg.Header
     ):
-        source_image = cv2.resize(source_image, ObjectSegmenter.MODEL_INPUT_SIZE)
+        source_image = np.array(
+            cv2.resize(source_image, Segmentation.MODEL_INPUT_SIZE), dtype=np.uint8
+        )
 
-        input_image: npt.NDArray[np.float64] = source_image / 255
+        input_image = source_image / 255
         input_image = (
             input_image - self.standardization_mean
         ) / self.standardization_std
@@ -181,17 +184,17 @@ class ObjectSegmenter(rclpy.node.Node):
         self.label_image_pub.publish(label_image_msg)
 
         with self.result_lock:
-            self.result = ObjectSegmenter.Result(labels, source_image)
+            self.result = Segmentation.Result(labels, source_image)
 
 
 def main(args=None):
     rclpy.init(args=args)
 
-    object_segmenter = ObjectSegmenter()
+    segmentation = Segmentation()
 
-    rclpy.spin(object_segmenter)
+    rclpy.spin(segmentation)
 
-    object_segmenter.destroy_node()
+    segmentation.destroy_node()
     rclpy.shutdown()
 
 
