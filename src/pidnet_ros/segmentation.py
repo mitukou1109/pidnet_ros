@@ -94,8 +94,8 @@ class Segmentation(rclpy.node.Node):
         self.result: Segmentation.Result | None = None
 
         self.label_image_pub = self.create_publisher(
-            sensor_msgs.msg.Image,
-            "~/label_image",
+            sensor_msgs.msg.CompressedImage,
+            "~/label_image/compressed",
             1,
         )
 
@@ -178,9 +178,8 @@ class Segmentation(rclpy.node.Node):
         )
         labels = prediction.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-        label_image_msg = self.cv_bridge.cv2_to_imgmsg(
-            labels, encoding="8UC1", header=header
-        )
+        label_image_msg = self.cv_bridge.cv2_to_compressed_imgmsg(labels)
+        label_image_msg.header = header
         self.label_image_pub.publish(label_image_msg)
 
         with self.result_lock:
