@@ -23,13 +23,25 @@ git clone git@github.com:mitukou1109/pidnet_ros.git
 rosdep install -iyr --from-paths src
 ```
 
-Jetsonの場合は、PyTorchとTorchvisionを対応するバージョンに変更
-https://pypi.jetson-ai-lab.io/jp6/cu126 からURLを取得し、以下のコマンドを実行
+Jetsonの場合は、システムにcuSPARSELt、PyTorch、TorchVisionをインストール
+PyTorchのwheelやTorchVisionのリポジトリのバージョンは環境に合わせる
 
 ```bash
-cd ~/minitruck_ws/src/clipseg_ros
-uv add --no-sync <url to torch whl>
-uv add --no-sync <url to torchvision whl>
+cd ~/minitruck_ws/src/pidnet_ros
+uv remove --no-sync torch
+uv remove --no-sync torchvision
+
+cd ~ # 例
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/sbsa/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+sudo apt install cusparselt-cuda-12
+
+pip install --no-cache https://developer.nvidia.com/w/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl
+
+git clone https://github.com/pytorch/vision.git -b v0.20.0
+cd vision
+pip install . --no-build-isolation
 ```
 
 ワークスペースをビルド
