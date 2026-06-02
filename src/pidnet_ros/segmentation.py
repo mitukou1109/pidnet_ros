@@ -31,14 +31,10 @@ class Segmentation(rclpy.node.Node):
         super().__init__("segmentation")
 
         checkpoint_file = (
-            self.declare_parameter("checkpoint_file", "")
-            .get_parameter_value()
-            .string_value
+            self.declare_parameter("checkpoint_file", "").get_parameter_value().string_value
         )
         num_of_classes = (
-            self.declare_parameter("num_of_classes", 4)
-            .get_parameter_value()
-            .integer_value
+            self.declare_parameter("num_of_classes", 4).get_parameter_value().integer_value
         )
         self.class_colors = np.array(
             ast.literal_eval(
@@ -62,9 +58,7 @@ class Segmentation(rclpy.node.Node):
             .double_array_value
         )
         self.use_compressed_image = (
-            self.declare_parameter("use_compressed_image", True)
-            .get_parameter_value()
-            .bool_value
+            self.declare_parameter("use_compressed_image", True).get_parameter_value().bool_value
         )
         result_visualization_rate = (
             self.declare_parameter("result_visualization_rate", 10.0)
@@ -73,9 +67,7 @@ class Segmentation(rclpy.node.Node):
         )
 
         self.model = pidnet.get_pred_model("pidnet-s", num_classes=num_of_classes)
-        checkpoint: dict = torch.load(
-            checkpoint_file, map_location="cpu", weights_only=True
-        )
+        checkpoint: dict = torch.load(checkpoint_file, map_location="cpu", weights_only=True)
         if "state_dict" in checkpoint:
             checkpoint = checkpoint["state_dict"]
         model_dict = self.model.state_dict()
@@ -96,6 +88,11 @@ class Segmentation(rclpy.node.Node):
         self.label_image_pub = self.create_publisher(
             sensor_msgs.msg.CompressedImage,
             "~/label_image/compressed",
+            1,
+        )
+        self.result_image_pub = self.create_publisher(
+            sensor_msgs.msg.CompressedImage,
+            "~/result_image/compressed",
             1,
         )
 
@@ -149,20 +146,17 @@ class Segmentation(rclpy.node.Node):
             cv2.COLOR_RGB2BGR,
         )
 
-        cv2.imshow("Segmentation", result_image)
-        cv2.waitKey(1)
+        result_image_msg = self.cv_bridge.cv2_to_compressed_imgmsg(result_image)
+        result_image_msg.header.stamp = self.get_clock().now().to_msg()
+        self.result_image_pub.publish(result_image_msg)
 
-    def segment_objects(
-        self, source_image: npt.NDArray[np.uint8], header: std_msgs.msg.Header
-    ):
+    def segment_objects(self, source_image: npt.NDArray[np.uint8], header: std_msgs.msg.Header):
         source_image = np.array(
             cv2.resize(source_image, Segmentation.MODEL_INPUT_SIZE), dtype=np.uint8
         )
 
         input_image = source_image / 255
-        input_image = (
-            input_image - self.standardization_mean
-        ) / self.standardization_std
+        input_image = (input_image - self.standardization_mean) / self.standardization_std
         input_image = input_image.transpose((2, 0, 1))
 
         input_tensor = torch.from_numpy(input_image).float().unsqueeze(0).cuda()
